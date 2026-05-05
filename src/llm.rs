@@ -50,6 +50,8 @@ struct ScoringResult { relevance: f32, topic: String }
 pub async fn score_articles(
     client: &reqwest::Client,
     model: &str,
+    persona_name: &str,
+    persona_description: &str,
     articles: &mut [Article],
     tx: &UnboundedSender<ProgressEvent>,
 ) -> Result<()> {
@@ -72,7 +74,7 @@ pub async fn score_articles(
         }).collect();
 
         let prompt = format!(
-r#"You are an intelligence analyst for the Head of Emerging Technologies. Score each item below by how much it matters for someone tracking: AI/ML breakthroughs, startups & funding, computer-science research, hardware/chips, robotics, cybersecurity, and emerging tech themes.
+r#"You are an intelligence analyst for {}. Score each item below by how much it matters for someone tracking: {}
 
 For each item, return a relevance score 0.0–10.0 (10 = must-read, 0 = noise) and a short topic tag (2–4 words, lowercase). Invent new tags if a story doesn't fit existing ones — emerging themes matter.
 
@@ -82,6 +84,8 @@ Items:
 Return ONLY a JSON object of this exact shape:
 {{"scores": [{{"relevance": 7.5, "topic": "llm training"}}, ...]}}
 The array must have exactly {} entries in the same order as the items above."#,
+            persona_name,
+            persona_description,
             items.join("\n\n"),
             chunk.len()
         );
@@ -109,34 +113,35 @@ The array must have exactly {} entries in the same order as the items above."#,
     Ok(())
 }
 
-pub async fn summarize_article(client: &reqwest::Client, model: &str, article: &Article) -> Result<String> {
+pub async fn summarize_article(client: &reqwest::Client, model: &str, persona_name: &str, article: &Article) -> Result<String> {
     let body: String = article.summary.chars().take(1500).collect();
     let prompt = format!(
-r#"Summarize the following news item in EXACTLY 2 sentences for a busy executive who tracks emerging technology. Be concrete: name the actors, the number, the technique, the impact. No fluff, no "in this article", no editorializing.
+r#"Summarize the following news item in EXACTLY 2 sentences for {}. Be concrete: name the actors, the number, the technique, the impact. No fluff, no "in this article", no editorializing.
 
 Title: {}
 Source: {}
 Content: {}
 
 Two-sentence summary:"#,
-        article.title, article.source, body
+        persona_name, article.title, article.source, body
     );
     let response = ollama_call(client, model, prompt, false, 200).await?;
     Ok(response.trim().to_string())
 }
 
-pub async fn daily_brief(client: &reqwest::Client, model: &str, top_articles: &[Article]) -> Result<String> {
+pub async fn daily_brief(client: &reqwest::Client, model: &str, persona_name: &str, top_articles: &[Article]) -> Result<String> {
     let bullets: Vec<String> = top_articles.iter().take(15).map(|a| {
         format!("- [{}] {}", a.topic_tag.as_deref().unwrap_or("?"), a.title)
     }).collect();
 
     let prompt = format!(
-r#"You are briefing the Head of Emerging Technologies. Below are today's top headlines, already filtered for relevance. Write a single-paragraph (4–6 sentences) executive briefing that synthesizes the THEMES of the day — what's the through-line? what's accelerating? what should they pay attention to this week? Be specific, name companies and technologies. No greetings, no sign-off, just the briefing.
+r#"You are briefing {}. Below are today's top headlines, already filtered for relevance. Write a single-paragraph (4–6 sentences) executive briefing that synthesizes the THEMES of the day — what's the through-line? what's accelerating? what should they pay attention to this week? Be specific, name companies and technologies. No greetings, no sign-off, just the briefing.
 
 Today's top items:
 {}
 
 Briefing:"#,
+        persona_name,
         bullets.join("\n")
     );
     let response = ollama_call(client, model, prompt, false, 350).await?;

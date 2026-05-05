@@ -3,6 +3,7 @@ use eframe::egui::{self, Color32, FontFamily, FontId, RichText, Stroke, Vec2};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
+use crate::feeds::Persona;
 use crate::fetcher::Article;
 use crate::llm::check_ollama;
 use crate::pipeline::{run_pipeline, PipelineConfig};
@@ -27,6 +28,10 @@ pub struct TechBriefApp {
     runtime: Arc<tokio::runtime::Runtime>,
     storage: Storage,
     view: View,
+
+    personas: Vec<Persona>,
+    selected_persona_idx: usize,
+    persona_manager_open: bool,
 
     model: String,
     hours: i64,
@@ -72,13 +77,18 @@ impl TechBriefApp {
             tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio runtime")
         );
         let storage = Storage::open().expect("open storage");
-        let available_dates = storage.all_dates().unwrap_or_default();
+        let personas = storage.list_personas().unwrap_or_else(|_| vec![Persona::default()]);
+        let selected_persona_idx = 0;
+        let selected_persona = &personas[selected_persona_idx];
+
+        let available_dates = storage.all_dates(selected_persona.id.unwrap_or(1)).unwrap_or_default();
         let today = Local::now().date_naive();
-        let current_brief = storage.load(today).ok().flatten().map(DisplayedBrief::from_stored);
+        let current_brief = storage.load(today, selected_persona.id.unwrap_or(1)).ok().flatten().map(DisplayedBrief::from_stored);
         let view = if current_brief.is_some() { View::Results } else { View::Idle };
 
         Self {
             runtime, storage, view,
+            personas, selected_persona_idx, persona_manager_open: false,
             model: "llama3.1:8b".to_string(),
             hours: 24, top_n: 20,
             progress_rx: None,
@@ -103,7 +113,8 @@ impl TechBriefApp {
         self.current_percent = 0;
         self.view = View::Loading;
 
-        let cfg = PipelineConfig { model: self.model.clone(), hours: self.hours, top_n: self.top_n };
+        let persona = self.personas[self.selected_persona_idx].clone();
+        let cfg = PipelineConfig { model: self.model.clone(), hours: self.hours, top_n: self.top_n, persona };
         self.runtime.spawn(async move { run_pipeline(cfg, tx).await; });
     }
 
@@ -120,8 +131,9 @@ impl TechBriefApp {
                     }
                     ProgressEvent::Done { brief, articles, stats } => {
                         let today = Local::now().date_naive();
-                        let _ = self.storage.save(today, &brief, &articles, &stats, &self.model);
-                        self.available_dates = self.storage.all_dates().unwrap_or_default();
+                        let persona_id = self.personas[self.selected_persona_idx].id.unwrap_or(1);
+                        let _ = self.storage.save(today, persona_id, &brief, &articles, &stats, &self.model);
+                        self.available_dates = self.storage.all_dates(persona_id).unwrap_or_default();
                         self.current_brief = Some(DisplayedBrief {
                             date: today, brief, articles, stats, model: self.model.clone(),
                         });
@@ -168,7 +180,8 @@ impl TechBriefApp {
     }
 
     fn navigate(&mut self, target: NaiveDate) {
-        if let Ok(Some(stored)) = self.storage.load(target) {
+        let persona_id = self.personas[self.selected_persona_idx].id.unwrap_or(1);
+        if let Ok(Some(stored)) = self.storage.load(target, persona_id) {
             self.current_brief = Some(DisplayedBrief::from_stored(stored));
             self.topic_filter = "all".to_string();
             self.view = View::Results;
@@ -184,7 +197,7 @@ impl eframe::App for TechBriefApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(BG).inner_margin(egui::Margin::ZERO))
             .show(ctx, |ui| {
-                draw_masthead(ui, self.ollama_ok, &self.model);
+                self.draw_masthead(ui);
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     match self.view {
                         View::Idle => self.draw_idle(ui),
@@ -193,10 +206,169 @@ impl eframe::App for TechBriefApp {
                     }
                 });
             });
+
+        if self.persona_manager_open {
+            self.draw_persona_manager(ctx);
+        }
     }
 }
 
 impl TechBriefApp {
+    fn draw_masthead(&mut self, ui: &mut egui::Ui) {
+        egui::Frame::none().fill(BG)
+            .inner_margin(egui::Margin { left: 36.0, right: 36.0, top: 22.0, bottom: 16.0 })
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("▲").font(FontId::proportional(24.0)).color(ACCENT));
+                    ui.add_space(12.0);
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new("TECHBRIEF")
+                            .font(FontId::new(26.0, FontFamily::Name("serif-bold".into())))
+                            .color(INK));
+                        ui.label(RichText::new("PERSONAL INTELLIGENCE · VOL. I")
+                            .font(FontId::new(9.5, FontFamily::Monospace))
+                            .color(INK_FAINT));
+                    });
+
+                    ui.add_space(40.0);
+
+                    // Persona Selector
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new("PERSONA")
+                            .font(FontId::new(9.5, FontFamily::Monospace)).color(INK_FAINT));
+                        let selected_name = self.personas[self.selected_persona_idx].name.clone();
+                        egui::ComboBox::from_id_salt("persona_select")
+                            .selected_text(RichText::new(selected_name)
+                                .font(FontId::new(16.0, FontFamily::Name("serif-italic".into())))
+                                .color(GOLD))
+                            .show_ui(ui, |ui| {
+                                for i in 0..self.personas.len() {
+                                    if ui.selectable_label(self.selected_persona_idx == i, &self.personas[i].name).clicked() {
+                                        self.selected_persona_idx = i;
+                                        let persona_id = self.personas[i].id.unwrap_or(1);
+                                        self.available_dates = self.storage.all_dates(persona_id).unwrap_or_default();
+                                        let today = Local::now().date_naive();
+                                        if let Ok(Some(stored)) = self.storage.load(today, persona_id) {
+                                            self.current_brief = Some(DisplayedBrief::from_stored(stored));
+                                            self.view = View::Results;
+                                        } else {
+                                            self.current_brief = None;
+                                            self.view = View::Idle;
+                                        }
+                                    }
+                                }
+                                ui.separator();
+                                if ui.button("+ Manage Personas").clicked() {
+                                    self.persona_manager_open = true;
+                                    ui.close_menu();
+                                }
+                            });
+                    });
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let dot_color = if self.ollama_ok { GREEN } else { ACCENT };
+                        let status_text = if self.ollama_ok {
+                            format!("OLLAMA · {} READY", self.model.to_uppercase())
+                        } else {
+                            "OLLAMA OFFLINE / MODEL MISSING".to_string()
+                        };
+                        ui.label(RichText::new(status_text)
+                            .font(FontId::new(10.0, FontFamily::Monospace)).color(INK_FAINT));
+                        ui.add_space(8.0);
+                        let (rect, _) = ui.allocate_exact_size(Vec2::splat(8.0), egui::Sense::hover());
+                        ui.painter().circle_filled(rect.center(), 4.0, dot_color);
+                        ui.add_space(16.0);
+                        ui.label(RichText::new(Local::now().format("%A · %B %d, %Y").to_string())
+                            .font(FontId::new(13.0, FontFamily::Name("serif-italic".into())))
+                            .color(INK_DIM));
+                    });
+                });
+            });
+        // Bottom rule under the masthead
+        draw_rule(ui);
+    }
+
+    fn draw_persona_manager(&mut self, ctx: &egui::Context) {
+        let mut open = self.persona_manager_open;
+        egui::Window::new("Manage Personas")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(600.0)
+            .show(ctx, |ui| {
+                ui.label("Create and edit your news personas.");
+                ui.add_space(10.0);
+
+                let mut to_delete = None;
+                let mut to_save = None;
+
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for (i, persona) in self.personas.iter_mut().enumerate() {
+                        ui.group(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new("NAME").font(FontId::new(9.0, FontFamily::Monospace)).color(INK_FAINT));
+                                    ui.text_edit_singleline(&mut persona.name);
+                                });
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                                    if persona.id != Some(1) {
+                                        if ui.button("🗑").on_hover_text("Delete Persona").clicked() {
+                                            to_delete = Some(i);
+                                        }
+                                    }
+                                });
+                            });
+                            ui.add_space(4.0);
+                            ui.label(RichText::new("DESCRIPTION").font(FontId::new(9.0, FontFamily::Monospace)).color(INK_FAINT));
+                            ui.text_edit_multiline(&mut persona.description);
+                            ui.add_space(4.0);
+                            ui.label(RichText::new("FEEDS (one URL per line)").font(FontId::new(9.0, FontFamily::Monospace)).color(INK_FAINT));
+                            let mut feeds_text = persona.feeds.iter().map(|f| f.url.clone()).collect::<Vec<_>>().join("\n");
+                            if ui.text_edit_multiline(&mut feeds_text).changed() {
+                                persona.feeds = feeds_text.lines()
+                                    .filter(|l| !l.trim().is_empty())
+                                    .map(|l| crate::feeds::FeedSource {
+                                        name: l.split('/').last().unwrap_or("Feed").to_string(),
+                                        url: l.to_string(),
+                                        category: "General".to_string()
+                                    }).collect();
+                            }
+
+                            if ui.button("Save Changes").clicked() {
+                                to_save = Some(i);
+                            }
+                        });
+                        ui.add_space(10.0);
+                    }
+                });
+
+                if let Some(idx) = to_delete {
+                    if let Some(id) = self.personas[idx].id {
+                        let _ = self.storage.delete_persona(id);
+                    }
+                    self.personas.remove(idx);
+                    if self.selected_persona_idx >= self.personas.len() {
+                        self.selected_persona_idx = 0;
+                    }
+                }
+
+                if let Some(idx) = to_save {
+                    let _ = self.storage.save_persona(&self.personas[idx]);
+                }
+
+                ui.separator();
+                if ui.button("+ Add New Persona").clicked() {
+                    self.personas.push(Persona {
+                        id: None,
+                        name: "New Persona".into(),
+                        description: "What are you looking for?".into(),
+                        feeds: vec![],
+                    });
+                }
+            });
+        self.persona_manager_open = open;
+    }
+
     fn draw_idle(&mut self, ui: &mut egui::Ui) {
         ui.add_space(60.0);
         ui.vertical_centered(|ui| {
@@ -353,8 +525,9 @@ impl TechBriefApp {
     }
 
     fn draw_date_nav(&mut self, ui: &mut egui::Ui, current: NaiveDate) {
-        let prev = self.storage.previous_date(current).ok().flatten();
-        let next = self.storage.next_date(current).ok().flatten();
+        let persona_id = self.personas[self.selected_persona_idx].id.unwrap_or(1);
+        let prev = self.storage.previous_date(current, persona_id).ok().flatten();
+        let next = self.storage.next_date(current, persona_id).ok().flatten();
         let today = Local::now().date_naive();
 
         ui.horizontal(|ui| {
@@ -384,7 +557,7 @@ impl TechBriefApp {
 
             ui.add_space(20.0);
             if current != today && ghost_button(ui, "JUMP TO TODAY").clicked() {
-                if let Ok(Some(stored)) = self.storage.load(today) {
+                if let Ok(Some(stored)) = self.storage.load(today, persona_id) {
                     self.current_brief = Some(DisplayedBrief::from_stored(stored));
                 } else {
                     self.view = View::Idle;
@@ -431,44 +604,6 @@ impl TechBriefApp {
             ui.add_space(20.0);
         }
     }
-}
-
-fn draw_masthead(ui: &mut egui::Ui, ollama_ok: bool, model: &str) {
-    egui::Frame::none().fill(BG)
-        .inner_margin(egui::Margin { left: 36.0, right: 36.0, top: 22.0, bottom: 16.0 })
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("▲").font(FontId::proportional(24.0)).color(ACCENT));
-                ui.add_space(12.0);
-                ui.vertical(|ui| {
-                    ui.label(RichText::new("TECHBRIEF")
-                        .font(FontId::new(26.0, FontFamily::Name("serif-bold".into())))
-                        .color(INK));
-                    ui.label(RichText::new("PERSONAL INTELLIGENCE · VOL. I")
-                        .font(FontId::new(9.5, FontFamily::Monospace))
-                        .color(INK_FAINT));
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let dot_color = if ollama_ok { GREEN } else { ACCENT };
-                    let status_text = if ollama_ok {
-                        format!("OLLAMA · {} READY", model.to_uppercase())
-                    } else {
-                        "OLLAMA OFFLINE / MODEL MISSING".to_string()
-                    };
-                    ui.label(RichText::new(status_text)
-                        .font(FontId::new(10.0, FontFamily::Monospace)).color(INK_FAINT));
-                    ui.add_space(8.0);
-                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(8.0), egui::Sense::hover());
-                    ui.painter().circle_filled(rect.center(), 4.0, dot_color);
-                    ui.add_space(16.0);
-                    ui.label(RichText::new(Local::now().format("%A · %B %d, %Y").to_string())
-                        .font(FontId::new(13.0, FontFamily::Name("serif-italic".into())))
-                        .color(INK_DIM));
-                });
-            });
-        });
-    // Bottom rule under the masthead
-    draw_rule(ui);
 }
 
 fn draw_rule(ui: &mut egui::Ui) {

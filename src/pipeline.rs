@@ -1,6 +1,6 @@
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::feeds::default_feeds;
+use crate::feeds::Persona;
 use crate::fetcher::fetch_all;
 use crate::llm::{daily_brief, ollama_client, score_articles, summarize_article};
 use crate::progress::{BriefStats, ProgressEvent};
@@ -9,14 +9,15 @@ pub struct PipelineConfig {
     pub model: String,
     pub hours: i64,
     pub top_n: usize,
+    pub persona: Persona,
 }
 
 pub async fn run_pipeline(cfg: PipelineConfig, tx: UnboundedSender<ProgressEvent>) {
-    let sources = default_feeds();
+    let sources = &cfg.persona.feeds;
     let n_feeds = sources.len();
 
     // === FETCH ===
-    let articles = fetch_all(&sources, cfg.hours, &tx).await;
+    let articles = fetch_all(sources, cfg.hours, &tx).await;
     let total = articles.len();
     let _ = tx.send(ProgressEvent::Stage {
         stage: "FETCH".into(),
@@ -37,7 +38,7 @@ pub async fn run_pipeline(cfg: PipelineConfig, tx: UnboundedSender<ProgressEvent
     let mut to_score: Vec<_> = articles.into_iter().take(80).collect();
 
     // === SCORE ===
-    if let Err(e) = score_articles(&client, &cfg.model, &mut to_score, &tx).await {
+    if let Err(e) = score_articles(&client, &cfg.model, &cfg.persona.name, &cfg.persona.description, &mut to_score, &tx).await {
         let _ = tx.send(ProgressEvent::Error(format!(
             "LLM scoring failed: {}. Is Ollama running with model '{}'?",
             e, cfg.model
@@ -58,7 +59,7 @@ pub async fn run_pipeline(cfg: PipelineConfig, tx: UnboundedSender<ProgressEvent
             message: format!("[{}/{}] {}", i + 1, n, title_short),
             percent: pct,
         });
-        match summarize_article(&client, &cfg.model, article).await {
+        match summarize_article(&client, &cfg.model, &cfg.persona.name, article).await {
             Ok(s) => article.ai_summary = Some(s),
             Err(_) => article.ai_summary = Some(article.summary.clone()),
         }
@@ -70,7 +71,7 @@ pub async fn run_pipeline(cfg: PipelineConfig, tx: UnboundedSender<ProgressEvent
         message: "Synthesizing the day's themes…".into(),
         percent: 94,
     });
-    let brief = daily_brief(&client, &cfg.model, &top).await
+    let brief = daily_brief(&client, &cfg.model, &cfg.persona.name, &top).await
         .unwrap_or_else(|e| format!("(Brief generation failed: {}.)", e));
 
     let _ = tx.send(ProgressEvent::Stage {

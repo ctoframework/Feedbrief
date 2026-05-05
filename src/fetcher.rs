@@ -53,7 +53,7 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
 }
 
 async fn fetch_one(client: &reqwest::Client, source: &FeedSource, max_age: Duration) -> Result<Vec<Article>> {
-    let resp = client.get(source.url)
+    let resp = client.get(&source.url)
         .timeout(StdDuration::from_secs(15))
         .header("User-Agent", "TechBrief/0.2 (personal news aggregator)")
         .send()
