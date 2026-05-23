@@ -870,6 +870,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "feedbrief"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "directories",
+ "eframe",
+ "egui",
+ "egui_extras",
+ "feed-rs",
+ "futures",
+ "hex",
+ "open",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3331,28 +3353,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "tech-brief"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "chrono",
- "directories",
- "eframe",
- "egui",
- "egui_extras",
- "feed-rs",
- "futures",
- "hex",
- "open",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
 ]
 
 [[package]]
