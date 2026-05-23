@@ -1,5 +1,5 @@
 [package]
-name = "tech-brief"
+name = "feedbrief"
 version = "0.2.0"
 edition = "2021"
 

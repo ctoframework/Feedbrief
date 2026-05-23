@@ -23,7 +23,7 @@ pub struct StoredBrief {
 }
 
 pub fn data_dir() -> PathBuf {
-    directories::ProjectDirs::from("com", "techbrief", "TechBrief")
+    directories::ProjectDirs::from("com", "feedbrief", "Feedbrief")
         .map(|p| p.data_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."))
 }

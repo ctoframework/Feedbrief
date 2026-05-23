@@ -24,7 +24,7 @@ const GREEN: Color32 = Color32::from_rgb(126, 184, 143);
 #[derive(PartialEq)]
 enum View { Idle, Loading, Results }
 
-pub struct TechBriefApp {
+pub struct FeedbriefApp {
     runtime: Arc<tokio::runtime::Runtime>,
     storage: Storage,
     view: View,
@@ -68,7 +68,7 @@ impl DisplayedBrief {
     }
 }
 
-impl TechBriefApp {
+impl FeedbriefApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         configure_fonts(&cc.egui_ctx);
         configure_style(&cc.egui_ctx);
@@ -189,7 +189,7 @@ impl TechBriefApp {
     }
 }
 
-impl eframe::App for TechBriefApp {
+impl eframe::App for FeedbriefApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_progress(ctx);
         self.poll_ollama();
@@ -213,7 +213,7 @@ impl eframe::App for TechBriefApp {
     }
 }
 
-impl TechBriefApp {
+impl FeedbriefApp {
     fn draw_masthead(&mut self, ui: &mut egui::Ui) {
         egui::Frame::none().fill(BG)
             .inner_margin(egui::Margin { left: 36.0, right: 36.0, top: 22.0, bottom: 16.0 })
@@ -222,7 +222,7 @@ impl TechBriefApp {
                     ui.label(RichText::new("▲").font(FontId::proportional(24.0)).color(ACCENT));
                     ui.add_space(12.0);
                     ui.vertical(|ui| {
-                        ui.label(RichText::new("TECHBRIEF")
+                        ui.label(RichText::new("FEEDBRIEF")
                             .font(FontId::new(26.0, FontFamily::Name("serif-bold".into())))
                             .color(INK));
                         ui.label(RichText::new("PERSONAL INTELLIGENCE · VOL. I")

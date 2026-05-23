@@ -1,4 +1,4 @@
-# TechBrief — native edition
+# Feedbrief — native edition
 
 Pure native cross-platform desktop app. No webview, no HTML, no JavaScript. Pulls ~28 RSS feeds in parallel, scores them with a local Ollama model, summarizes the top stories, and produces a daily executive briefing. Saves each day to a local SQLite database so you can flip back through history.
 
@@ -6,7 +6,7 @@ Pure native cross-platform desktop app. No webview, no HTML, no JavaScript. Pull
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  TechBrief (single ~15 MB native binary)                │
+│  Feedbrief (single ~15 MB native binary)                │
 │                                                         │
 │  ┌────────────────┐         ┌─────────────────────────┐ │
 │  │  egui + eframe │         │  Rust async pipeline    │ │
@@ -49,7 +49,7 @@ Pure native cross-platform desktop app. No webview, no HTML, no JavaScript. Pull
 ## Build & run
 
 ```bash
-cd tech-brief-egui
+cd feedbrief
 
 # (Optional) Download fonts for the editorial look
 # See assets/README.md — drop 4 .ttf files into assets/
@@ -59,24 +59,24 @@ cargo run
 
 # Build release (~5min first time, single optimized binary)
 cargo build --release
-./target/release/tech-brief        # macOS/Linux
-.\target\release\tech-brief.exe    # Windows
+./target/release/feedbrief        # macOS/Linux
+.\target\release\feedbrief.exe    # Windows
 ```
 
 The first build takes a while because eframe pulls in `winit`, `wgpu`, and the platform graphics stack. After that, incremental builds are seconds.
 
 ## Where data is stored
 
-- **macOS**: `~/Library/Application Support/com.techbrief.TechBrief/briefs.db`
-- **Linux**: `~/.local/share/TechBrief/briefs.db`
-- **Windows**: `%APPDATA%\techbrief\TechBrief\data\briefs.db`
+- **macOS**: `~/Library/Application Support/com.feedbrief.Feedbrief/briefs.db`
+- **Linux**: `~/.local/share/Feedbrief/briefs.db`
+- **Windows**: `%APPDATA%\feedbrief\Feedbrief\data\briefs.db`
 
 Plain SQLite — open it with any SQLite browser if you want to grep through old briefs or export to markdown.
 
 ## File layout
 
 ```
-tech-brief-egui/
+feedbrief/
 ├── Cargo.toml
 ├── README.md
 ├── assets/                       ← optional .ttf font files

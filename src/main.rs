@@ -15,12 +15,12 @@ fn main() -> Result<(), eframe::Error> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 850.0])
             .with_min_inner_size([900.0, 600.0])
-            .with_title("TechBrief"),
+            .with_title("Feedbrief"),
         ..Default::default()
     };
     eframe::run_native(
-        "TechBrief",
+        "Feedbrief",
         options,
-        Box::new(|cc| Ok(Box::new(app::TechBriefApp::new(cc)))),
+        Box::new(|cc| Ok(Box::new(app::FeedbriefApp::new(cc)))),
     )
 }
