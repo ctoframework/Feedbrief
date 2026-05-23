@@ -2,12 +2,12 @@ use chrono::{Local, NaiveDate};
 use eframe::egui::{self, Color32, FontFamily, FontId, RichText, Stroke, Vec2};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use crate::feeds::Persona;
 use crate::fetcher::Article;
 use crate::llm::check_ollama;
-use crate::pipeline::{run_pipeline, PipelineConfig};
+use crate::pipeline::{PipelineConfig, run_pipeline};
 use crate::progress::{BriefStats, ProgressEvent};
 use crate::storage::{Storage, StoredBrief};
 
@@ -396,11 +396,26 @@ impl FeedbriefApp {
                                 .font(FontId::new(26.0, FontFamily::Name("serif-bold".into())))
                                 .color(INK),
                         );
-                        ui.label(
-                            RichText::new("PERSONAL INTELLIGENCE · VOL. I")
-                                .font(FontId::new(9.5, FontFamily::Monospace))
-                                .color(INK_FAINT),
-                        );
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("By")
+                                    .font(FontId::new(9.5, FontFamily::Monospace))
+                                    .color(INK_FAINT),
+                            );
+                            ui.add_space(4.0);
+                            ui.hyperlink_to(
+                                RichText::new("CTOFramework.com")
+                                    .font(FontId::new(9.5, FontFamily::Monospace))
+                                    .color(INK_FAINT),
+                                "https://ctoframework.com",
+                            );
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new(format!("- v{}", env!("CARGO_PKG_VERSION")))
+                                    .font(FontId::new(9.5, FontFamily::Monospace))
+                                    .color(INK_FAINT),
+                            );
+                        });
                     });
 
                     ui.add_space(40.0);

@@ -2,8 +2,16 @@ use crate::fetcher::Article;
 
 #[derive(Debug, Clone)]
 pub enum ProgressEvent {
-    Stage { stage: String, message: String, percent: u8 },
-    Done { brief: String, articles: Vec<Article>, stats: BriefStats },
+    Stage {
+        stage: String,
+        message: String,
+        percent: u8,
+    },
+    Done {
+        brief: String,
+        articles: Vec<Article>,
+        stats: BriefStats,
+    },
     Error(String),
 }
 

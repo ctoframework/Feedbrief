@@ -46,14 +46,21 @@ fn clean_html(input: &str) -> String {
 
 /// UTF-8-safe truncation by character count (never panics on multi-byte boundaries).
 fn truncate_chars(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars { return s.to_string(); }
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
     let mut out: String = s.chars().take(max_chars).collect();
     out.push('…');
     out
 }
 
-async fn fetch_one(client: &reqwest::Client, source: &FeedSource, max_age: Duration) -> Result<Vec<Article>> {
-    let resp = client.get(&source.url)
+async fn fetch_one(
+    client: &reqwest::Client,
+    source: &FeedSource,
+    max_age: Duration,
+) -> Result<Vec<Article>> {
+    let resp = client
+        .get(&source.url)
         .timeout(StdDuration::from_secs(15))
         .header("User-Agent", "Feedbrief/0.2 (personal news aggregator)")
         .send()
@@ -65,13 +72,26 @@ async fn fetch_one(client: &reqwest::Client, source: &FeedSource, max_age: Durat
     let mut articles = Vec::new();
 
     for entry in feed.entries {
-        let url = entry.links.first().map(|l| l.href.clone()).unwrap_or_default();
-        if url.is_empty() { continue; }
-        let title = entry.title.map(|t| t.content).unwrap_or_else(|| "Untitled".to_string());
+        let url = entry
+            .links
+            .first()
+            .map(|l| l.href.clone())
+            .unwrap_or_default();
+        if url.is_empty() {
+            continue;
+        }
+        let title = entry
+            .title
+            .map(|t| t.content)
+            .unwrap_or_else(|| "Untitled".to_string());
         let published = entry.published.or(entry.updated).unwrap_or_else(Utc::now);
-        if published < cutoff { continue; }
+        if published < cutoff {
+            continue;
+        }
 
-        let raw_summary = entry.summary.map(|s| s.content)
+        let raw_summary = entry
+            .summary
+            .map(|s| s.content)
             .or_else(|| entry.content.and_then(|c| c.body))
             .unwrap_or_default();
         let summary = clean_html(&raw_summary);
@@ -112,14 +132,17 @@ pub async fn fetch_all(
         percent: 2,
     });
 
-    let mut futs: FuturesUnordered<_> = sources.iter().map(|s| {
-        let client = client.clone();
-        let source = s.clone();
-        async move {
-            let result = fetch_one(&client, &source, max_age).await;
-            (source, result)
-        }
-    }).collect();
+    let mut futs: FuturesUnordered<_> = sources
+        .iter()
+        .map(|s| {
+            let client = client.clone();
+            let source = s.clone();
+            async move {
+                let result = fetch_one(&client, &source, max_age).await;
+                (source, result)
+            }
+        })
+        .collect();
 
     let mut all = Vec::new();
     let mut completed = 0usize;
