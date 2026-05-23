@@ -1,5 +1,6 @@
 use chrono::{Local, NaiveDate};
 use eframe::egui::{self, Color32, FontFamily, FontId, RichText, Stroke, Vec2};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
@@ -22,7 +23,11 @@ const GOLD: Color32 = Color32::from_rgb(212, 168, 87);
 const GREEN: Color32 = Color32::from_rgb(126, 184, 143);
 
 #[derive(PartialEq)]
-enum View { Idle, Loading, Results }
+enum View {
+    Idle,
+    Loading,
+    Results,
+}
 
 pub struct FeedbriefApp {
     runtime: Arc<tokio::runtime::Runtime>,
@@ -32,6 +37,10 @@ pub struct FeedbriefApp {
     personas: Vec<Persona>,
     selected_persona_idx: usize,
     persona_manager_open: bool,
+    persona_export_path: String,
+    persona_import_path: String,
+    persona_message: String,
+    persona_message_is_error: bool,
 
     model: String,
     hours: i64,
@@ -64,7 +73,13 @@ struct DisplayedBrief {
 
 impl DisplayedBrief {
     fn from_stored(s: StoredBrief) -> Self {
-        Self { date: s.date, brief: s.brief, articles: s.articles, stats: s.stats, model: s.model }
+        Self {
+            date: s.date,
+            brief: s.brief,
+            articles: s.articles,
+            stats: s.stats,
+            model: s.model,
+        }
     }
 }
 
@@ -74,29 +89,54 @@ impl FeedbriefApp {
         configure_style(&cc.egui_ctx);
 
         let runtime = Arc::new(
-            tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio runtime")
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime"),
         );
         let storage = Storage::open().expect("open storage");
-        let personas = storage.list_personas().unwrap_or_else(|_| vec![Persona::default()]);
+        let personas = storage
+            .list_personas()
+            .unwrap_or_else(|_| vec![Persona::default()]);
         let selected_persona_idx = 0;
         let selected_persona = &personas[selected_persona_idx];
 
-        let available_dates = storage.all_dates(selected_persona.id.unwrap_or(1)).unwrap_or_default();
+        let available_dates = storage
+            .all_dates(selected_persona.id.unwrap_or(1))
+            .unwrap_or_default();
         let today = Local::now().date_naive();
-        let current_brief = storage.load(today, selected_persona.id.unwrap_or(1)).ok().flatten().map(DisplayedBrief::from_stored);
-        let view = if current_brief.is_some() { View::Results } else { View::Idle };
+        let current_brief = storage
+            .load(today, selected_persona.id.unwrap_or(1))
+            .ok()
+            .flatten()
+            .map(DisplayedBrief::from_stored);
+        let view = if current_brief.is_some() {
+            View::Results
+        } else {
+            View::Idle
+        };
 
         Self {
-            runtime, storage, view,
-            personas, selected_persona_idx, persona_manager_open: false,
+            runtime,
+            storage,
+            view,
+            personas,
+            selected_persona_idx,
+            persona_manager_open: false,
+            persona_export_path: Storage::personas_config_path().display().to_string(),
+            persona_import_path: Storage::personas_config_path().display().to_string(),
+            persona_message: String::new(),
+            persona_message_is_error: false,
             model: "llama3.1:8b".to_string(),
-            hours: 24, top_n: 20,
+            hours: 24,
+            top_n: 20,
             progress_rx: None,
             progress_log: Arc::new(Mutex::new(Vec::new())),
             current_stage: String::new(),
             current_message: String::new(),
             current_percent: 0,
-            current_brief, topic_filter: "all".to_string(),
+            current_brief,
+            topic_filter: "all".to_string(),
             ollama_ok: false,
             last_ollama_check: std::time::Instant::now() - std::time::Duration::from_secs(60),
             ollama_check_rx: None,
@@ -114,8 +154,15 @@ impl FeedbriefApp {
         self.view = View::Loading;
 
         let persona = self.personas[self.selected_persona_idx].clone();
-        let cfg = PipelineConfig { model: self.model.clone(), hours: self.hours, top_n: self.top_n, persona };
-        self.runtime.spawn(async move { run_pipeline(cfg, tx).await; });
+        let cfg = PipelineConfig {
+            model: self.model.clone(),
+            hours: self.hours,
+            top_n: self.top_n,
+            persona,
+        };
+        self.runtime.spawn(async move {
+            run_pipeline(cfg, tx).await;
+        });
     }
 
     fn poll_progress(&mut self, ctx: &egui::Context) {
@@ -123,19 +170,42 @@ impl FeedbriefApp {
         if let Some(rx) = self.progress_rx.as_mut() {
             while let Ok(event) = rx.try_recv() {
                 match event {
-                    ProgressEvent::Stage { stage, message, percent } => {
+                    ProgressEvent::Stage {
+                        stage,
+                        message,
+                        percent,
+                    } => {
                         self.current_stage = stage.clone();
                         self.current_message = message.clone();
                         self.current_percent = percent;
-                        self.progress_log.lock().unwrap().push(format!("[{}] {}", stage, message));
+                        self.progress_log
+                            .lock()
+                            .unwrap()
+                            .push(format!("[{}] {}", stage, message));
                     }
-                    ProgressEvent::Done { brief, articles, stats } => {
+                    ProgressEvent::Done {
+                        brief,
+                        articles,
+                        stats,
+                    } => {
                         let today = Local::now().date_naive();
                         let persona_id = self.personas[self.selected_persona_idx].id.unwrap_or(1);
-                        let _ = self.storage.save(today, persona_id, &brief, &articles, &stats, &self.model);
-                        self.available_dates = self.storage.all_dates(persona_id).unwrap_or_default();
+                        let _ = self.storage.save(
+                            today,
+                            persona_id,
+                            &brief,
+                            &articles,
+                            &stats,
+                            &self.model,
+                        );
+                        self.available_dates =
+                            self.storage.all_dates(persona_id).unwrap_or_default();
                         self.current_brief = Some(DisplayedBrief {
-                            date: today, brief, articles, stats, model: self.model.clone(),
+                            date: today,
+                            brief,
+                            articles,
+                            stats,
+                            model: self.model.clone(),
                         });
                         self.topic_filter = "all".to_string();
                         self.view = View::Results;
@@ -149,7 +219,9 @@ impl FeedbriefApp {
                 }
             }
         }
-        if completed { self.progress_rx = None; }
+        if completed {
+            self.progress_rx = None;
+        }
         if self.view == View::Loading {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
@@ -195,16 +267,20 @@ impl eframe::App for FeedbriefApp {
         self.poll_ollama();
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(BG).inner_margin(egui::Margin::ZERO))
+            .frame(
+                egui::Frame::none()
+                    .fill(BG)
+                    .inner_margin(egui::Margin::ZERO),
+            )
             .show(ctx, |ui| {
                 self.draw_masthead(ui);
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    match self.view {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| match self.view {
                         View::Idle => self.draw_idle(ui),
                         View::Loading => self.draw_loading(ui),
                         View::Results => self.draw_results(ui),
-                    }
-                });
+                    });
             });
 
         if self.persona_manager_open {
@@ -214,47 +290,148 @@ impl eframe::App for FeedbriefApp {
 }
 
 impl FeedbriefApp {
+    fn selected_persona_id(&self) -> i64 {
+        self.personas
+            .get(self.selected_persona_idx)
+            .and_then(|persona| persona.id)
+            .unwrap_or(1)
+    }
+
+    fn select_persona_by_index(&mut self, idx: usize) {
+        if self.personas.is_empty() {
+            self.personas = vec![Persona::default()];
+        }
+        self.selected_persona_idx = idx.min(self.personas.len() - 1);
+        let persona_id = self.selected_persona_id();
+        self.available_dates = self.storage.all_dates(persona_id).unwrap_or_default();
+        let today = Local::now().date_naive();
+        if let Ok(Some(stored)) = self.storage.load(today, persona_id) {
+            self.current_brief = Some(DisplayedBrief::from_stored(stored));
+            self.view = View::Results;
+        } else {
+            self.current_brief = None;
+            self.view = View::Idle;
+        }
+    }
+
+    fn reload_personas(&mut self, preserve_persona_id: Option<i64>) {
+        let selected_id = preserve_persona_id.unwrap_or_else(|| self.selected_persona_id());
+        self.personas = self
+            .storage
+            .list_personas()
+            .unwrap_or_else(|_| vec![Persona::default()]);
+        if self.personas.is_empty() {
+            self.personas = vec![Persona::default()];
+        }
+        let idx = self
+            .personas
+            .iter()
+            .position(|persona| persona.id == Some(selected_id))
+            .unwrap_or(0);
+        self.select_persona_by_index(idx);
+    }
+
+    fn resolve_persona_path(input: &str, default: PathBuf) -> PathBuf {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            default
+        } else {
+            PathBuf::from(trimmed)
+        }
+    }
+
+    fn export_personas_config(&mut self) {
+        let path =
+            Self::resolve_persona_path(&self.persona_export_path, Storage::personas_config_path());
+        match self.storage.export_personas_to_path(&path) {
+            Ok(()) => {
+                self.persona_message_is_error = false;
+                self.persona_message = format!("Exported personas to {}", path.display());
+            }
+            Err(err) => {
+                self.persona_message_is_error = true;
+                self.persona_message = format!("Failed to export personas: {}", err);
+            }
+        }
+    }
+
+    fn import_personas_config(&mut self) {
+        let path =
+            Self::resolve_persona_path(&self.persona_import_path, Storage::personas_config_path());
+        let selected_id = self.selected_persona_id();
+        match self.storage.import_personas_from_path(&path) {
+            Ok(count) => {
+                self.reload_personas(Some(selected_id));
+                self.persona_message_is_error = false;
+                self.persona_message =
+                    format!("Imported {} personas from {}", count, path.display());
+            }
+            Err(err) => {
+                self.persona_message_is_error = true;
+                self.persona_message = format!("Failed to import personas: {}", err);
+            }
+        }
+    }
+
     fn draw_masthead(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::none().fill(BG)
-            .inner_margin(egui::Margin { left: 36.0, right: 36.0, top: 22.0, bottom: 16.0 })
+        egui::Frame::none()
+            .fill(BG)
+            .inner_margin(egui::Margin {
+                left: 36.0,
+                right: 36.0,
+                top: 22.0,
+                bottom: 16.0,
+            })
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("▲").font(FontId::proportional(24.0)).color(ACCENT));
+                    ui.label(
+                        RichText::new("▲")
+                            .font(FontId::proportional(24.0))
+                            .color(ACCENT),
+                    );
                     ui.add_space(12.0);
                     ui.vertical(|ui| {
-                        ui.label(RichText::new("FEEDBRIEF")
-                            .font(FontId::new(26.0, FontFamily::Name("serif-bold".into())))
-                            .color(INK));
-                        ui.label(RichText::new("PERSONAL INTELLIGENCE · VOL. I")
-                            .font(FontId::new(9.5, FontFamily::Monospace))
-                            .color(INK_FAINT));
+                        ui.label(
+                            RichText::new("FEEDBRIEF")
+                                .font(FontId::new(26.0, FontFamily::Name("serif-bold".into())))
+                                .color(INK),
+                        );
+                        ui.label(
+                            RichText::new("PERSONAL INTELLIGENCE · VOL. I")
+                                .font(FontId::new(9.5, FontFamily::Monospace))
+                                .color(INK_FAINT),
+                        );
                     });
 
                     ui.add_space(40.0);
 
                     // Persona Selector
                     ui.vertical(|ui| {
-                        ui.label(RichText::new("PERSONA")
-                            .font(FontId::new(9.5, FontFamily::Monospace)).color(INK_FAINT));
+                        ui.label(
+                            RichText::new("PERSONA")
+                                .font(FontId::new(9.5, FontFamily::Monospace))
+                                .color(INK_FAINT),
+                        );
                         let selected_name = self.personas[self.selected_persona_idx].name.clone();
                         egui::ComboBox::from_id_salt("persona_select")
-                            .selected_text(RichText::new(selected_name)
-                                .font(FontId::new(16.0, FontFamily::Name("serif-italic".into())))
-                                .color(GOLD))
+                            .selected_text(
+                                RichText::new(selected_name)
+                                    .font(FontId::new(
+                                        16.0,
+                                        FontFamily::Name("serif-italic".into()),
+                                    ))
+                                    .color(GOLD),
+                            )
                             .show_ui(ui, |ui| {
                                 for i in 0..self.personas.len() {
-                                    if ui.selectable_label(self.selected_persona_idx == i, &self.personas[i].name).clicked() {
-                                        self.selected_persona_idx = i;
-                                        let persona_id = self.personas[i].id.unwrap_or(1);
-                                        self.available_dates = self.storage.all_dates(persona_id).unwrap_or_default();
-                                        let today = Local::now().date_naive();
-                                        if let Ok(Some(stored)) = self.storage.load(today, persona_id) {
-                                            self.current_brief = Some(DisplayedBrief::from_stored(stored));
-                                            self.view = View::Results;
-                                        } else {
-                                            self.current_brief = None;
-                                            self.view = View::Idle;
-                                        }
+                                    if ui
+                                        .selectable_label(
+                                            self.selected_persona_idx == i,
+                                            &self.personas[i].name,
+                                        )
+                                        .clicked()
+                                    {
+                                        self.select_persona_by_index(i);
                                     }
                                 }
                                 ui.separator();
@@ -272,15 +449,21 @@ impl FeedbriefApp {
                         } else {
                             "OLLAMA OFFLINE / MODEL MISSING".to_string()
                         };
-                        ui.label(RichText::new(status_text)
-                            .font(FontId::new(10.0, FontFamily::Monospace)).color(INK_FAINT));
+                        ui.label(
+                            RichText::new(status_text)
+                                .font(FontId::new(10.0, FontFamily::Monospace))
+                                .color(INK_FAINT),
+                        );
                         ui.add_space(8.0);
-                        let (rect, _) = ui.allocate_exact_size(Vec2::splat(8.0), egui::Sense::hover());
+                        let (rect, _) =
+                            ui.allocate_exact_size(Vec2::splat(8.0), egui::Sense::hover());
                         ui.painter().circle_filled(rect.center(), 4.0, dot_color);
                         ui.add_space(16.0);
-                        ui.label(RichText::new(Local::now().format("%A · %B %d, %Y").to_string())
-                            .font(FontId::new(13.0, FontFamily::Name("serif-italic".into())))
-                            .color(INK_DIM));
+                        ui.label(
+                            RichText::new(Local::now().format("%A · %B %d, %Y").to_string())
+                                .font(FontId::new(13.0, FontFamily::Name("serif-italic".into())))
+                                .color(INK_DIM),
+                        );
                     });
                 });
             });
@@ -299,6 +482,56 @@ impl FeedbriefApp {
                 ui.label("Create and edit your news personas.");
                 ui.add_space(10.0);
 
+                ui.group(|ui| {
+                    ui.label(
+                        RichText::new("PERSONA CONFIG BACKUP")
+                            .font(FontId::new(9.0, FontFamily::Monospace))
+                            .color(INK_FAINT),
+                    );
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(
+                                RichText::new("EXPORT JSON PATH")
+                                    .font(FontId::new(9.0, FontFamily::Monospace))
+                                    .color(INK_FAINT),
+                            );
+                            ui.text_edit_singleline(&mut self.persona_export_path);
+                        });
+                        if ui.button("Export JSON").clicked() {
+                            self.export_personas_config();
+                        }
+                    });
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(
+                                RichText::new("IMPORT JSON PATH")
+                                    .font(FontId::new(9.0, FontFamily::Monospace))
+                                    .color(INK_FAINT),
+                            );
+                            ui.text_edit_singleline(&mut self.persona_import_path);
+                        });
+                        if ui.button("Import JSON").clicked() {
+                            self.import_personas_config();
+                        }
+                    });
+                    if !self.persona_message.is_empty() {
+                        ui.add_space(6.0);
+                        let color = if self.persona_message_is_error {
+                            ACCENT
+                        } else {
+                            GREEN
+                        };
+                        ui.label(
+                            RichText::new(&self.persona_message)
+                                .font(FontId::new(10.0, FontFamily::Monospace))
+                                .color(color),
+                        );
+                    }
+                });
+
+                ui.add_space(10.0);
                 let mut to_delete = None;
                 let mut to_save = None;
 
@@ -307,31 +540,57 @@ impl FeedbriefApp {
                         ui.group(|ui| {
                             ui.horizontal(|ui| {
                                 ui.vertical(|ui| {
-                                    ui.label(RichText::new("NAME").font(FontId::new(9.0, FontFamily::Monospace)).color(INK_FAINT));
+                                    ui.label(
+                                        RichText::new("NAME")
+                                            .font(FontId::new(9.0, FontFamily::Monospace))
+                                            .color(INK_FAINT),
+                                    );
                                     ui.text_edit_singleline(&mut persona.name);
                                 });
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                                    if persona.id != Some(1) {
-                                        if ui.button("🗑").on_hover_text("Delete Persona").clicked() {
-                                            to_delete = Some(i);
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Min),
+                                    |ui| {
+                                        if persona.id != Some(1) {
+                                            if ui
+                                                .button("🗑")
+                                                .on_hover_text("Delete Persona")
+                                                .clicked()
+                                            {
+                                                to_delete = Some(i);
+                                            }
                                         }
-                                    }
-                                });
+                                    },
+                                );
                             });
                             ui.add_space(4.0);
-                            ui.label(RichText::new("DESCRIPTION").font(FontId::new(9.0, FontFamily::Monospace)).color(INK_FAINT));
+                            ui.label(
+                                RichText::new("DESCRIPTION")
+                                    .font(FontId::new(9.0, FontFamily::Monospace))
+                                    .color(INK_FAINT),
+                            );
                             ui.text_edit_multiline(&mut persona.description);
                             ui.add_space(4.0);
-                            ui.label(RichText::new("FEEDS (one URL per line)").font(FontId::new(9.0, FontFamily::Monospace)).color(INK_FAINT));
-                            let mut feeds_text = persona.feeds.iter().map(|f| f.url.clone()).collect::<Vec<_>>().join("\n");
+                            ui.label(
+                                RichText::new("FEEDS (one URL per line)")
+                                    .font(FontId::new(9.0, FontFamily::Monospace))
+                                    .color(INK_FAINT),
+                            );
+                            let mut feeds_text = persona
+                                .feeds
+                                .iter()
+                                .map(|f| f.url.clone())
+                                .collect::<Vec<_>>()
+                                .join("\n");
                             if ui.text_edit_multiline(&mut feeds_text).changed() {
-                                persona.feeds = feeds_text.lines()
+                                persona.feeds = feeds_text
+                                    .lines()
                                     .filter(|l| !l.trim().is_empty())
                                     .map(|l| crate::feeds::FeedSource {
                                         name: l.split('/').last().unwrap_or("Feed").to_string(),
                                         url: l.to_string(),
-                                        category: "General".to_string()
-                                    }).collect();
+                                        category: "General".to_string(),
+                                    })
+                                    .collect();
                             }
 
                             if ui.button("Save Changes").clicked() {
@@ -347,9 +606,13 @@ impl FeedbriefApp {
                         let _ = self.storage.delete_persona(id);
                     }
                     self.personas.remove(idx);
+                    if self.personas.is_empty() {
+                        self.personas.push(Persona::default());
+                    }
                     if self.selected_persona_idx >= self.personas.len() {
                         self.selected_persona_idx = 0;
                     }
+                    self.select_persona_by_index(self.selected_persona_idx);
                 }
 
                 if let Some(idx) = to_save {
@@ -443,22 +706,29 @@ impl FeedbriefApp {
             ui.vertical(|ui| {
                 ui.label(overline(&self.current_stage));
                 ui.add_space(10.0);
-                ui.label(RichText::new(&self.current_message)
-                    .font(FontId::new(22.0, FontFamily::Name("serif-italic".into())))
-                    .color(INK));
+                ui.label(
+                    RichText::new(&self.current_message)
+                        .font(FontId::new(22.0, FontFamily::Name("serif-italic".into())))
+                        .color(INK),
+                );
                 ui.add_space(28.0);
 
                 let track_h = 3.0;
-                let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), track_h), egui::Sense::hover());
+                let (rect, _) = ui.allocate_exact_size(
+                    Vec2::new(ui.available_width(), track_h),
+                    egui::Sense::hover(),
+                );
                 ui.painter().rect_filled(rect, 0.0, RULE);
                 let fill_w = rect.width() * (self.current_percent as f32 / 100.0);
                 let fill_rect = egui::Rect::from_min_size(rect.min, Vec2::new(fill_w, track_h));
                 ui.painter().rect_filled(fill_rect, 0.0, ACCENT);
 
                 ui.add_space(8.0);
-                ui.label(RichText::new(format!("{}%", self.current_percent))
-                    .font(FontId::new(11.0, FontFamily::Monospace))
-                    .color(INK_FAINT));
+                ui.label(
+                    RichText::new(format!("{}%", self.current_percent))
+                        .font(FontId::new(11.0, FontFamily::Monospace))
+                        .color(INK_FAINT),
+                );
 
                 ui.add_space(36.0);
                 draw_rule(ui);
@@ -469,9 +739,11 @@ impl FeedbriefApp {
                 let log = self.progress_log.lock().unwrap().clone();
                 let visible: Vec<&String> = log.iter().rev().take(15).collect();
                 for line in visible.iter().rev() {
-                    ui.label(RichText::new(line.as_str())
-                        .font(FontId::new(11.5, FontFamily::Monospace))
-                        .color(INK_DIM));
+                    ui.label(
+                        RichText::new(line.as_str())
+                            .font(FontId::new(11.5, FontFamily::Monospace))
+                            .color(INK_DIM),
+                    );
                 }
             });
         });
@@ -479,7 +751,10 @@ impl FeedbriefApp {
     }
 
     fn draw_results(&mut self, ui: &mut egui::Ui) {
-        let brief = match &self.current_brief { Some(b) => b.clone(), None => return };
+        let brief = match &self.current_brief {
+            Some(b) => b.clone(),
+            None => return,
+        };
 
         ui.add_space(20.0);
         ui.vertical_centered(|ui| {
@@ -493,17 +768,24 @@ impl FeedbriefApp {
 
                 ui.label(overline("EXECUTIVE BRIEFING"));
                 ui.add_space(16.0);
-                ui.label(RichText::new(&brief.brief)
-                    .font(FontId::new(20.0, FontFamily::Name("serif".into())))
-                    .color(INK));
+                ui.label(
+                    RichText::new(&brief.brief)
+                        .font(FontId::new(20.0, FontFamily::Name("serif".into())))
+                        .color(INK),
+                );
 
                 ui.add_space(20.0);
-                ui.label(RichText::new(format!(
-                    "{} feeds · {} articles scanned · {} surfaced · model {}",
-                    brief.stats.feeds_fetched, brief.stats.total_articles, brief.stats.articles_kept, brief.model,
-                ))
+                ui.label(
+                    RichText::new(format!(
+                        "{} feeds · {} articles scanned · {} surfaced · model {}",
+                        brief.stats.feeds_fetched,
+                        brief.stats.total_articles,
+                        brief.stats.articles_kept,
+                        brief.model,
+                    ))
                     .font(FontId::new(10.0, FontFamily::Monospace))
-                    .color(INK_FAINT));
+                    .color(INK_FAINT),
+                );
 
                 ui.add_space(24.0);
                 draw_rule(ui);
@@ -526,7 +808,11 @@ impl FeedbriefApp {
 
     fn draw_date_nav(&mut self, ui: &mut egui::Ui, current: NaiveDate) {
         let persona_id = self.personas[self.selected_persona_idx].id.unwrap_or(1);
-        let prev = self.storage.previous_date(current, persona_id).ok().flatten();
+        let prev = self
+            .storage
+            .previous_date(current, persona_id)
+            .ok()
+            .flatten();
         let next = self.storage.next_date(current, persona_id).ok().flatten();
         let today = Local::now().date_naive();
 
@@ -535,25 +821,49 @@ impl FeedbriefApp {
                 Some(d) => format!("←  {}", d.format("%b %d")),
                 None => "←  no earlier".into(),
             };
-            let prev_resp = ui.add_enabled(prev.is_some(), egui::Button::new(
-                RichText::new(prev_label).font(FontId::new(10.5, FontFamily::Monospace)).color(INK_DIM)
-            ).fill(Color32::TRANSPARENT).stroke(Stroke::NONE));
-            if prev_resp.clicked() { if let Some(d) = prev { self.navigate(d); } }
+            let prev_resp = ui.add_enabled(
+                prev.is_some(),
+                egui::Button::new(
+                    RichText::new(prev_label)
+                        .font(FontId::new(10.5, FontFamily::Monospace))
+                        .color(INK_DIM),
+                )
+                .fill(Color32::TRANSPARENT)
+                .stroke(Stroke::NONE),
+            );
+            if prev_resp.clicked() {
+                if let Some(d) = prev {
+                    self.navigate(d);
+                }
+            }
 
             ui.add_space(12.0);
-            ui.label(RichText::new(current.format("%A · %B %d, %Y").to_string())
-                .font(FontId::new(20.0, FontFamily::Name("serif-italic".into())))
-                .color(GOLD));
+            ui.label(
+                RichText::new(current.format("%A · %B %d, %Y").to_string())
+                    .font(FontId::new(20.0, FontFamily::Name("serif-italic".into())))
+                    .color(GOLD),
+            );
             ui.add_space(12.0);
 
             let next_label = match next {
                 Some(d) => format!("{}  →", d.format("%b %d")),
                 None => "no later  →".into(),
             };
-            let next_resp = ui.add_enabled(next.is_some(), egui::Button::new(
-                RichText::new(next_label).font(FontId::new(10.5, FontFamily::Monospace)).color(INK_DIM)
-            ).fill(Color32::TRANSPARENT).stroke(Stroke::NONE));
-            if next_resp.clicked() { if let Some(d) = next { self.navigate(d); } }
+            let next_resp = ui.add_enabled(
+                next.is_some(),
+                egui::Button::new(
+                    RichText::new(next_label)
+                        .font(FontId::new(10.5, FontFamily::Monospace))
+                        .color(INK_DIM),
+                )
+                .fill(Color32::TRANSPARENT)
+                .stroke(Stroke::NONE),
+            );
+            if next_resp.clicked() {
+                if let Some(d) = next {
+                    self.navigate(d);
+                }
+            }
 
             ui.add_space(20.0);
             if current != today && ghost_button(ui, "JUMP TO TODAY").clicked() {
@@ -567,7 +877,10 @@ impl FeedbriefApp {
     }
 
     fn draw_filter_bar(&mut self, ui: &mut egui::Ui, articles: &[Article]) {
-        let mut topics: Vec<String> = articles.iter().filter_map(|a| a.topic_tag.clone()).collect();
+        let mut topics: Vec<String> = articles
+            .iter()
+            .filter_map(|a| a.topic_tag.clone())
+            .collect();
         topics.sort();
         topics.dedup();
 
@@ -585,7 +898,8 @@ impl FeedbriefApp {
 
     fn draw_articles(&mut self, ui: &mut egui::Ui, articles: &[Article]) {
         let filter = self.topic_filter.clone();
-        let filtered: Vec<&Article> = articles.iter()
+        let filtered: Vec<&Article> = articles
+            .iter()
             .filter(|a| filter == "all" || a.topic_tag.as_deref() == Some(&filter))
             .collect();
 
@@ -607,30 +921,45 @@ impl FeedbriefApp {
 }
 
 fn draw_rule(ui: &mut egui::Ui) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), egui::Sense::hover());
-    ui.painter().line_segment([rect.left_center(), rect.right_center()], Stroke::new(1.0, RULE));
+    let (rect, _) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), egui::Sense::hover());
+    ui.painter().line_segment(
+        [rect.left_center(), rect.right_center()],
+        Stroke::new(1.0, RULE),
+    );
 }
 
 fn draw_double_rule(ui: &mut egui::Ui) {
     for _ in 0..2 {
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), egui::Sense::hover());
-        ui.painter().line_segment([rect.left_center(), rect.right_center()], Stroke::new(1.0, RULE));
+        let (rect, _) =
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), egui::Sense::hover());
+        ui.painter().line_segment(
+            [rect.left_center(), rect.right_center()],
+            Stroke::new(1.0, RULE),
+        );
         ui.add_space(2.0);
     }
 }
 
 fn overline(text: &str) -> RichText {
-    RichText::new(text).font(FontId::new(10.5, FontFamily::Monospace)).color(ACCENT)
+    RichText::new(text)
+        .font(FontId::new(10.5, FontFamily::Monospace))
+        .color(ACCENT)
 }
 
 fn control_select(ui: &mut egui::Ui, label: &str, value: &mut String, options: &[&str]) {
     ui.vertical(|ui| {
-        ui.label(RichText::new(label)
-            .font(FontId::new(9.5, FontFamily::Monospace)).color(INK_FAINT));
+        ui.label(
+            RichText::new(label)
+                .font(FontId::new(9.5, FontFamily::Monospace))
+                .color(INK_FAINT),
+        );
         egui::ComboBox::from_id_salt(label)
-            .selected_text(RichText::new(value.as_str())
-                .font(FontId::new(15.0, FontFamily::Name("serif-italic".into())))
-                .color(GOLD))
+            .selected_text(
+                RichText::new(value.as_str())
+                    .font(FontId::new(15.0, FontFamily::Name("serif-italic".into())))
+                    .color(GOLD),
+            )
             .show_ui(ui, |ui| {
                 for opt in options {
                     if ui.selectable_label(value == opt, *opt).clicked() {
@@ -652,34 +981,51 @@ fn fetch_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
     );
     let pos = rect.center() - galley.size() / 2.0;
     ui.painter().galley(pos, galley, BG);
-    if response.hovered() { ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand); }
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
     response
 }
 
 fn ghost_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    ui.add(egui::Button::new(
-        RichText::new(text).font(FontId::new(10.5, FontFamily::Monospace)).color(INK_DIM)
-    ).fill(Color32::TRANSPARENT).stroke(Stroke::new(1.0, RULE)).min_size(Vec2::new(0.0, 36.0)))
+    ui.add(
+        egui::Button::new(
+            RichText::new(text)
+                .font(FontId::new(10.5, FontFamily::Monospace))
+                .color(INK_DIM),
+        )
+        .fill(Color32::TRANSPARENT)
+        .stroke(Stroke::new(1.0, RULE))
+        .min_size(Vec2::new(0.0, 36.0)),
+    )
 }
 
 fn topic_pill(ui: &mut egui::Ui, text: &str, active: bool) -> egui::Response {
     let bg = if active { INK } else { Color32::TRANSPARENT };
     let fg = if active { BG } else { INK_DIM };
-    let resp = ui.add(egui::Button::new(
-        RichText::new(text.to_uppercase())
-            .font(FontId::new(9.5, FontFamily::Monospace))
-            .color(fg)
-    ).fill(bg).stroke(Stroke::new(1.0, RULE)));
+    let resp = ui.add(
+        egui::Button::new(
+            RichText::new(text.to_uppercase())
+                .font(FontId::new(9.5, FontFamily::Monospace))
+                .color(fg),
+        )
+        .fill(bg)
+        .stroke(Stroke::new(1.0, RULE)),
+    );
     ui.add_space(4.0);
     resp
 }
 
 fn history_pill(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    let resp = ui.add(egui::Button::new(
-        RichText::new(text.to_uppercase())
-            .font(FontId::new(10.0, FontFamily::Monospace))
-            .color(INK_DIM)
-    ).fill(BG_RAISED).stroke(Stroke::new(1.0, RULE)));
+    let resp = ui.add(
+        egui::Button::new(
+            RichText::new(text.to_uppercase())
+                .font(FontId::new(10.0, FontFamily::Monospace))
+                .color(INK_DIM),
+        )
+        .fill(BG_RAISED)
+        .stroke(Stroke::new(1.0, RULE)),
+    );
     ui.add_space(6.0);
     resp
 }
@@ -694,42 +1040,77 @@ fn draw_article_card(ui: &mut egui::Ui, article: &Article) {
                 ui.horizontal(|ui| {
                     egui::Frame::none()
                         .fill(Color32::from_rgba_premultiplied(255, 87, 34, 30))
-                        .inner_margin(egui::Margin { left: 8.0, right: 8.0, top: 3.0, bottom: 3.0 })
+                        .inner_margin(egui::Margin {
+                            left: 8.0,
+                            right: 8.0,
+                            top: 3.0,
+                            bottom: 3.0,
+                        })
                         .show(ui, |ui| {
-                            ui.label(RichText::new(topic.to_uppercase())
-                                .font(FontId::new(9.0, FontFamily::Monospace)).color(GOLD));
+                            ui.label(
+                                RichText::new(topic.to_uppercase())
+                                    .font(FontId::new(9.0, FontFamily::Monospace))
+                                    .color(GOLD),
+                            );
                         });
                 });
                 ui.add_space(8.0);
             }
 
             ui.horizontal(|ui| {
-                let date_str = article.published.with_timezone(&Local).format("%b %d · %H:%M").to_string();
-                ui.label(RichText::new(format!("{} · {}", article.source.to_uppercase(), date_str))
-                    .font(FontId::new(9.5, FontFamily::Monospace)).color(INK_FAINT));
+                let date_str = article
+                    .published
+                    .with_timezone(&Local)
+                    .format("%b %d · %H:%M")
+                    .to_string();
+                ui.label(
+                    RichText::new(format!("{} · {}", article.source.to_uppercase(), date_str))
+                        .font(FontId::new(9.5, FontFamily::Monospace))
+                        .color(INK_FAINT),
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let score = article.relevance.unwrap_or(0.0);
-                    ui.label(RichText::new(format!("{:.1}/10", score))
-                        .font(FontId::new(10.0, FontFamily::Monospace)).color(ACCENT));
+                    ui.label(
+                        RichText::new(format!("{:.1}/10", score))
+                            .font(FontId::new(10.0, FontFamily::Monospace))
+                            .color(ACCENT),
+                    );
                 });
             });
 
             ui.add_space(10.0);
-            ui.label(RichText::new(&article.title)
-                .font(FontId::new(18.0, FontFamily::Name("serif-bold".into()))).color(INK));
+            ui.label(
+                RichText::new(&article.title)
+                    .font(FontId::new(18.0, FontFamily::Name("serif-bold".into())))
+                    .color(INK),
+            );
             ui.add_space(10.0);
 
-            let summary = article.ai_summary.clone().unwrap_or_else(|| article.summary.clone());
-            ui.label(RichText::new(summary)
-                .font(FontId::new(13.5, FontFamily::Name("serif".into()))).color(INK_DIM));
+            let summary = article
+                .ai_summary
+                .clone()
+                .unwrap_or_else(|| article.summary.clone());
+            ui.label(
+                RichText::new(summary)
+                    .font(FontId::new(13.5, FontFamily::Name("serif".into())))
+                    .color(INK_DIM),
+            );
 
             ui.add_space(14.0);
-            let resp = ui.add(egui::Label::new(
-                RichText::new("READ AT SOURCE  →")
-                    .font(FontId::new(9.5, FontFamily::Monospace)).color(ACCENT)
-            ).sense(egui::Sense::click()));
-            if resp.hovered() { ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand); }
-            if resp.clicked() { let _ = open::that(&article.url); }
+            let resp = ui.add(
+                egui::Label::new(
+                    RichText::new("READ AT SOURCE  →")
+                        .font(FontId::new(9.5, FontFamily::Monospace))
+                        .color(ACCENT),
+                )
+                .sense(egui::Sense::click()),
+            );
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            if resp.clicked() {
+                let _ = open::that(&article.url);
+            }
         });
 }
 
@@ -758,47 +1139,87 @@ fn configure_style(ctx: &egui::Context) {
 fn configure_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
-    let try_load = |name: &str, path: &std::path::Path, fonts: &mut egui::FontDefinitions| -> bool {
-        match std::fs::read(path) {
-            Ok(bytes) => {
-                fonts.font_data.insert(name.to_string(), egui::FontData::from_owned(bytes));
-                true
+    let try_load =
+        |name: &str, path: &std::path::Path, fonts: &mut egui::FontDefinitions| -> bool {
+            match std::fs::read(path) {
+                Ok(bytes) => {
+                    fonts
+                        .font_data
+                        .insert(name.to_string(), egui::FontData::from_owned(bytes));
+                    true
+                }
+                Err(_) => false,
             }
-            Err(_) => false,
-        }
-    };
+        };
 
     let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
-    let has_serif        = try_load("serif",        &assets.join("Fraunces-Regular.ttf"),    &mut fonts);
-    let has_serif_bold   = try_load("serif_bold",   &assets.join("Fraunces-Bold.ttf"),       &mut fonts);
-    let has_serif_italic = try_load("serif_italic", &assets.join("Fraunces-Italic.ttf"),     &mut fonts);
-    let has_mono         = try_load("mono",         &assets.join("JetBrainsMono-Regular.ttf"), &mut fonts);
+    let has_serif = try_load("serif", &assets.join("Fraunces-Regular.ttf"), &mut fonts);
+    let has_serif_bold = try_load("serif_bold", &assets.join("Fraunces-Bold.ttf"), &mut fonts);
+    let has_serif_italic = try_load(
+        "serif_italic",
+        &assets.join("Fraunces-Italic.ttf"),
+        &mut fonts,
+    );
+    let has_mono = try_load(
+        "mono",
+        &assets.join("JetBrainsMono-Regular.ttf"),
+        &mut fonts,
+    );
 
-    let default_prop: Vec<String> = fonts.families.get(&FontFamily::Proportional)
-        .cloned().unwrap_or_default();
+    let default_prop: Vec<String> = fonts
+        .families
+        .get(&FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
 
     if has_serif {
-        fonts.families.insert(FontFamily::Name("serif".into()), vec!["serif".into()]);
+        fonts
+            .families
+            .insert(FontFamily::Name("serif".into()), vec!["serif".into()]);
     } else {
-        fonts.families.insert(FontFamily::Name("serif".into()), default_prop.clone());
+        fonts
+            .families
+            .insert(FontFamily::Name("serif".into()), default_prop.clone());
     }
 
     if has_serif_bold {
-        fonts.families.insert(FontFamily::Name("serif-bold".into()), vec!["serif_bold".into()]);
+        fonts.families.insert(
+            FontFamily::Name("serif-bold".into()),
+            vec!["serif_bold".into()],
+        );
     } else {
-        let fallback = fonts.families.get(&FontFamily::Name("serif".into())).cloned().unwrap_or(default_prop.clone());
-        fonts.families.insert(FontFamily::Name("serif-bold".into()), fallback);
+        let fallback = fonts
+            .families
+            .get(&FontFamily::Name("serif".into()))
+            .cloned()
+            .unwrap_or(default_prop.clone());
+        fonts
+            .families
+            .insert(FontFamily::Name("serif-bold".into()), fallback);
     }
 
     if has_serif_italic {
-        fonts.families.insert(FontFamily::Name("serif-italic".into()), vec!["serif_italic".into()]);
+        fonts.families.insert(
+            FontFamily::Name("serif-italic".into()),
+            vec!["serif_italic".into()],
+        );
     } else {
-        let fallback = fonts.families.get(&FontFamily::Name("serif".into())).cloned().unwrap_or(default_prop);
-        fonts.families.insert(FontFamily::Name("serif-italic".into()), fallback);
+        let fallback = fonts
+            .families
+            .get(&FontFamily::Name("serif".into()))
+            .cloned()
+            .unwrap_or(default_prop);
+        fonts
+            .families
+            .insert(FontFamily::Name("serif-italic".into()), fallback);
     }
 
     if has_mono {
-        fonts.families.entry(FontFamily::Monospace).or_default().insert(0, "mono".into());
+        fonts
+            .families
+            .entry(FontFamily::Monospace)
+            .or_default()
+            .insert(0, "mono".into());
     }
 
     ctx.set_fonts(fonts);

@@ -19,6 +19,7 @@ Feedbrief is a native desktop app that turns RSS feeds into a daily briefing you
 - **Topic filtering** - narrow the finished briefing by topic tags
 - **History navigation** - move through previous days or jump from saved history pills
 - **Persona management** - create and edit persona profiles from inside the app
+- **Persona backup/restore** - export the full persona set to JSON and import it back from the persona manager
 - **Local persistence** - store briefs in SQLite so they are available across launches
 - **Offline-friendly workflow** - the app checks whether Ollama is available and uses only local inference
 
@@ -57,13 +58,14 @@ The first build takes longer because `eframe`, `winit`, `wgpu`, and the platform
 
 ## Data Storage
 
-Feedbrief stores briefs locally in SQLite.
+Feedbrief stores briefs locally in SQLite. Persona backups are written to a JSON file in the same data directory.
 
 - **macOS**: `~/Library/Application Support/com.feedbrief.Feedbrief/briefs.db`
 - **Linux**: `~/.local/share/Feedbrief/briefs.db`
 - **Windows**: `%APPDATA%\feedbrief\Feedbrief\data\briefs.db`
+- **Persona config**: `personas.json` in the same app data directory
 
-You can open the database with any SQLite browser if you want to inspect past briefs or export them.
+You can open the database with any SQLite browser if you want to inspect past briefs, and you can move persona definitions between machines by copying the JSON export.
 
 ## Customization
 
@@ -71,7 +73,7 @@ You can open the database with any SQLite browser if you want to inspect past br
 - **Adjust scoring or briefing prompts**: edit `src/llm.rs`
 - **Change the UI palette**: edit the color constants near the top of `src/app.rs`
 - **Tune the default window size**: edit `src/main.rs`
-- **Manage personas**: use the in-app persona editor
+- **Manage personas**: use the in-app persona editor and its JSON export/import controls
 
 ## Technical Notes
 

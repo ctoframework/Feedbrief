@@ -1,14 +1,24 @@
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
 use rusqlite::{params, Connection, OptionalExtension};
-use std::path::PathBuf;
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
-use crate::fetcher::Article;
 use crate::feeds::Persona;
+use crate::fetcher::Article;
 use crate::progress::BriefStats;
+
+const PERSONA_CONFIG_VERSION: u32 = 1;
 
 pub struct Storage {
     conn: Connection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersonaConfigFile {
+    version: u32,
+    personas: Vec<Persona>,
 }
 
 #[derive(Debug, Clone)]
@@ -36,17 +46,21 @@ impl Storage {
         let mut conn = Connection::open(path)?;
 
         // Migration: check if 'briefs' table has 'persona_id' column
-        let has_persona_id: bool = conn.query_row(
-            "SELECT count(*) FROM pragma_table_info('briefs') WHERE name='persona_id'",
-            [],
-            |r| Ok(r.get::<_, i64>(0)? > 0),
-        ).unwrap_or(false);
+        let has_persona_id: bool = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('briefs') WHERE name='persona_id'",
+                [],
+                |r| Ok(r.get::<_, i64>(0)? > 0),
+            )
+            .unwrap_or(false);
 
-        let table_exists: bool = conn.query_row(
-            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='briefs'",
-            [],
-            |r| Ok(r.get::<_, i64>(0)? > 0),
-        ).unwrap_or(false);
+        let table_exists: bool = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='briefs'",
+                [],
+                |r| Ok(r.get::<_, i64>(0)? > 0),
+            )
+            .unwrap_or(false);
 
         if table_exists && !has_persona_id {
             // Need to migrate: rename old table, create new one, copy data
@@ -72,7 +86,8 @@ impl Storage {
             tx.commit()?;
         }
 
-        conn.execute_batch(r#"
+        conn.execute_batch(
+            r#"
             CREATE TABLE IF NOT EXISTS personas (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 name        TEXT NOT NULL UNIQUE,
@@ -93,7 +108,8 @@ impl Storage {
                 PRIMARY KEY (date, persona_id),
                 FOREIGN KEY (persona_id) REFERENCES personas(id)
             );
-        "#)?;
+        "#,
+        )?;
 
         // Ensure default persona exists
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM personas", [], |r| r.get(0))?;
@@ -102,7 +118,12 @@ impl Storage {
             let feeds_json = serde_json::to_string(&default_persona.feeds)?;
             conn.execute(
                 "INSERT INTO personas (id, name, description, feeds_json) VALUES (?, ?, ?, ?)",
-                params![1, default_persona.name, default_persona.description, feeds_json],
+                params![
+                    1,
+                    default_persona.name,
+                    default_persona.description,
+                    feeds_json
+                ],
             )?;
         }
 
@@ -110,17 +131,98 @@ impl Storage {
     }
 
     pub fn list_personas(&self) -> Result<Vec<Persona>> {
-        let mut stmt = self.conn.prepare("SELECT id, name, description, feeds_json FROM personas")?;
-        let personas = stmt.query_map([], |row| {
-            let feeds_json: String = row.get(3)?;
-            Ok(Persona {
-                id: Some(row.get(0)?),
-                name: row.get(1)?,
-                description: row.get(2)?,
-                feeds: serde_json::from_str(&feeds_json).unwrap_or_default(),
-            })
-        })?.filter_map(|r| r.ok()).collect();
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, name, description, feeds_json FROM personas ORDER BY id ASC")?;
+        let personas = stmt
+            .query_map([], |row| {
+                let feeds_json: String = row.get(3)?;
+                Ok(Persona {
+                    id: Some(row.get(0)?),
+                    name: row.get(1)?,
+                    description: row.get(2)?,
+                    feeds: serde_json::from_str(&feeds_json).unwrap_or_default(),
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
         Ok(personas)
+    }
+
+    pub fn personas_config_path() -> PathBuf {
+        data_dir().join("personas.json")
+    }
+
+    pub fn export_personas_json(&self) -> Result<String> {
+        let personas = self.list_personas()?;
+        let archive = PersonaConfigFile {
+            version: PERSONA_CONFIG_VERSION,
+            personas,
+        };
+        Ok(serde_json::to_string_pretty(&archive)?)
+    }
+
+    pub fn export_personas_to_path<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        let json = self.export_personas_json()?;
+        std::fs::write(path, json)?;
+        Ok(())
+    }
+
+    pub fn import_personas_json(&mut self, json: &str) -> Result<usize> {
+        let mut archive: PersonaConfigFile = serde_json::from_str(json)?;
+        if archive.version != PERSONA_CONFIG_VERSION {
+            anyhow::bail!(
+                "Unsupported persona config version {} (expected {})",
+                archive.version,
+                PERSONA_CONFIG_VERSION
+            );
+        }
+        if archive.personas.is_empty() {
+            anyhow::bail!("Persona config does not contain any personas");
+        }
+
+        if archive.personas.iter().all(|persona| persona.id != Some(1)) {
+            archive.personas[0].id = Some(1);
+        }
+
+        let imported_count = archive.personas.len();
+        let mut ids = HashSet::new();
+        let mut names = HashSet::new();
+        for persona in &archive.personas {
+            let id = persona.id.unwrap_or(-1);
+            if !ids.insert(id) {
+                anyhow::bail!("Persona config contains duplicate ids");
+            }
+            if !names.insert(persona.name.clone()) {
+                anyhow::bail!("Persona config contains duplicate persona names");
+            }
+        }
+
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM personas", [])?;
+
+        for persona in archive.personas {
+            let feeds_json = serde_json::to_string(&persona.feeds)?;
+            if let Some(id) = persona.id {
+                tx.execute(
+                    "INSERT INTO personas (id, name, description, feeds_json) VALUES (?, ?, ?, ?)",
+                    params![id, persona.name, persona.description, feeds_json],
+                )?;
+            } else {
+                tx.execute(
+                    "INSERT INTO personas (name, description, feeds_json) VALUES (?, ?, ?)",
+                    params![persona.name, persona.description, feeds_json],
+                )?;
+            }
+        }
+
+        tx.commit()?;
+        Ok(imported_count)
+    }
+
+    pub fn import_personas_from_path<P: AsRef<Path>>(&mut self, path: P) -> Result<usize> {
+        let json = std::fs::read_to_string(path)?;
+        self.import_personas_json(&json)
     }
 
     pub fn save_persona(&self, persona: &Persona) -> Result<i64> {
@@ -141,14 +243,26 @@ impl Storage {
     }
 
     pub fn delete_persona(&self, id: i64) -> Result<()> {
-        if id == 1 { anyhow::bail!("Cannot delete default persona"); }
-        self.conn.execute("DELETE FROM briefs WHERE persona_id = ?", params![id])?;
-        self.conn.execute("DELETE FROM personas WHERE id = ?", params![id])?;
+        if id == 1 {
+            anyhow::bail!("Cannot delete default persona");
+        }
+        self.conn
+            .execute("DELETE FROM briefs WHERE persona_id = ?", params![id])?;
+        self.conn
+            .execute("DELETE FROM personas WHERE id = ?", params![id])?;
         Ok(())
     }
 
     /// Save (or overwrite) today's brief.
-    pub fn save(&self, date: NaiveDate, persona_id: i64, brief: &str, articles: &[Article], stats: &BriefStats, model: &str) -> Result<()> {
+    pub fn save(
+        &self,
+        date: NaiveDate,
+        persona_id: i64,
+        brief: &str,
+        articles: &[Article],
+        stats: &BriefStats,
+        model: &str,
+    ) -> Result<()> {
         let articles_json = serde_json::to_string(articles)?;
         let now = chrono::Utc::now().to_rfc3339();
         self.conn.execute(
@@ -194,7 +308,8 @@ impl Storage {
                 articles,
                 stats,
                 model,
-                created_at: chrono::DateTime::parse_from_rfc3339(&created_at_str)?.with_timezone(&chrono::Utc),
+                created_at: chrono::DateTime::parse_from_rfc3339(&created_at_str)?
+                    .with_timezone(&chrono::Utc),
                 persona_id,
             }))
         } else {
@@ -204,13 +319,17 @@ impl Storage {
 
     /// All dates that have a brief for a given persona, sorted ascending.
     pub fn all_dates(&self, persona_id: i64) -> Result<Vec<NaiveDate>> {
-        let mut stmt = self.conn.prepare("SELECT date FROM briefs WHERE persona_id = ? ORDER BY date ASC")?;
-        let dates: Vec<NaiveDate> = stmt.query_map(params![persona_id], |row| {
-            let s: String = row.get(0)?;
-            Ok(NaiveDate::parse_from_str(&s, "%Y-%m-%d").unwrap_or_else(|_| NaiveDate::from_ymd_opt(2000, 1, 1).unwrap()))
-        })?
-        .filter_map(|r| r.ok())
-        .collect();
+        let mut stmt = self
+            .conn
+            .prepare("SELECT date FROM briefs WHERE persona_id = ? ORDER BY date ASC")?;
+        let dates: Vec<NaiveDate> = stmt
+            .query_map(params![persona_id], |row| {
+                let s: String = row.get(0)?;
+                Ok(NaiveDate::parse_from_str(&s, "%Y-%m-%d")
+                    .unwrap_or_else(|_| NaiveDate::from_ymd_opt(2000, 1, 1).unwrap()))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
         Ok(dates)
     }
 
