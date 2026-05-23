@@ -1,79 +1,91 @@
-# Feedbrief — native edition
+# Feedbrief
 
-Pure native cross-platform desktop app. No webview, no HTML, no JavaScript. Pulls ~28 RSS feeds in parallel, scores them with a local Ollama model, summarizes the top stories, and produces a daily executive briefing. Saves each day to a local SQLite database so you can flip back through history.
+Feedbrief is a native desktop app that turns RSS feeds into a daily briefing you can actually read. It fetches stories in parallel, scores them with a local Ollama model, summarizes the important ones, and saves each day's result so you can revisit it later.
 
-## Architecture
+## What It Does
 
-```
-┌─────────────────────────────────────────────────────────┐
-│  Feedbrief (single ~15 MB native binary)                │
-│                                                         │
-│  ┌────────────────┐         ┌─────────────────────────┐ │
-│  │  egui + eframe │         │  Rust async pipeline    │ │
-│  │  (GPU-rendered │◄───────►│  - tokio runtime        │ │
-│  │   native UI)   │         │  - reqwest + feed-rs    │ │
-│  └────────────────┘         │  - ollama HTTP client   │ │
-│         │                   │  - rusqlite storage     │ │
-│         │                   └────────────┬────────────┘ │
-└─────────┼────────────────────────────────┼──────────────┘
-          │                                │
-          ▼                                ▼
-   ┌────────────┐    ┌──────────────┐    ┌──────────────┐
-   │ winit/wgpu │    │ ~28 RSS feeds │    │ Ollama local │
-   │ Vulkan/    │    │ (arXiv, DM,   │    │ (llama3.1,   │
-   │ Metal/DX   │    │  TC, HN, ...) │    │  qwen2.5...) │
-   └────────────┘    └──────────────┘    └──────────────┘
-```
+- Pulls from a configurable set of RSS feeds
+- Scores and tags stories with a local LLM
+- Generates a single executive-style briefing from the top items
+- Keeps a local history of briefs by date
+- Lets you switch between personas with different feed sets and briefing prompts
+- Opens the original article when you want the source material
+- Runs entirely on your machine, with no webview or hosted backend
 
-**No webview involved.** eframe draws every pixel through your platform's native graphics API (Metal on macOS, DirectX/Vulkan on Windows, Vulkan/OpenGL on Linux). Same APIs games use.
+## Key Features
 
-## What's new in this version
+- **Daily briefing view** - see today's synthesized summary at a glance
+- **Live pipeline feedback** - watch feeds load, articles score, and summaries complete in real time
+- **Topic filtering** - narrow the finished briefing by topic tags
+- **History navigation** - move through previous days or jump from saved history pills
+- **Persona management** - create and edit persona profiles from inside the app
+- **Local persistence** - store briefs in SQLite so they are available across launches
+- **Offline-friendly workflow** - the app checks whether Ollama is available and uses only local inference
 
-1. **Pure native UI** — egui + eframe. No HTML, no JS, no Tauri.
-2. **Granular live progress** — see each RSS feed completing in real time, each scoring batch ticking through, each article summary in flight. A scrolling LIVE LOG below the progress bar shows the last 15 events.
-3. **Date history** — every fetch is saved to SQLite (one brief per day, overwrites if re-fetched). Navigate with `← previous` / `next →` buttons or tap any history pill on the idle screen to jump to a specific day.
-4. **Auto-restore** — on launch, if today already has a brief saved, it shows immediately. No fetch needed.
+## How It Works
+
+1. RSS feeds are fetched in parallel.
+2. Articles are scored and tagged by the selected Ollama model.
+3. The strongest stories are summarized into a concise briefing.
+4. The final brief is saved locally and can be reopened later.
 
 ## Prerequisites
 
-1. **Rust 1.75+** — install from <https://rustup.rs>
-2. **Ollama** — install from <https://ollama.com>, then:
-   ```
+1. **Rust 1.75+** - install from <https://rustup.rs>
+2. **Ollama** - install from <https://ollama.com>, then pull at least one supported model:
+   ```bash
    ollama pull llama3.1:8b
    ```
-3. **Platform graphics deps**:
-   - macOS: nothing extra needed (Metal is built-in)
-   - Windows: nothing extra needed (DirectX is built-in)
+3. **Platform graphics dependencies**:
+   - macOS: nothing extra needed (Metal is built in)
+   - Windows: nothing extra needed (DirectX is built in)
    - Linux: `sudo apt install libxkbcommon-x11-0 libgtk-3-dev libwayland-dev libxkbcommon-dev`
 
-## Build & run
+## Build And Run
 
 ```bash
-cd feedbrief
-
-# (Optional) Download fonts for the editorial look
-# See assets/README.md — drop 4 .ttf files into assets/
-
-# Run in dev (debug build, slow startup, fast compile)
+# Run in development mode
 cargo run
 
-# Build release (~5min first time, single optimized binary)
+# Build a release binary
 cargo build --release
 ./target/release/feedbrief        # macOS/Linux
 .\target\release\feedbrief.exe    # Windows
 ```
 
-The first build takes a while because eframe pulls in `winit`, `wgpu`, and the platform graphics stack. After that, incremental builds are seconds.
+The first build takes longer because `eframe`, `winit`, `wgpu`, and the platform graphics stack need to compile. After that, incremental builds are much faster.
 
-## Where data is stored
+## Data Storage
+
+Feedbrief stores briefs locally in SQLite.
 
 - **macOS**: `~/Library/Application Support/com.feedbrief.Feedbrief/briefs.db`
 - **Linux**: `~/.local/share/Feedbrief/briefs.db`
 - **Windows**: `%APPDATA%\feedbrief\Feedbrief\data\briefs.db`
 
-Plain SQLite — open it with any SQLite browser if you want to grep through old briefs or export to markdown.
+You can open the database with any SQLite browser if you want to inspect past briefs or export them.
 
-## File layout
+## Customization
+
+- **Add or remove feeds**: edit `src/feeds.rs`
+- **Adjust scoring or briefing prompts**: edit `src/llm.rs`
+- **Change the UI palette**: edit the color constants near the top of `src/app.rs`
+- **Tune the default window size**: edit `src/main.rs`
+- **Manage personas**: use the in-app persona editor
+
+## Technical Notes
+
+Feedbrief is a fully native Rust desktop app. The main pieces are:
+
+- `egui` + `eframe` for the UI
+- `tokio` for async orchestration
+- `reqwest` and `feed-rs` for RSS fetching
+- `ollama` over HTTP for local scoring and summarization
+- `rusqlite` for persistence
+
+There is no browser shell involved; the app renders directly through the platform graphics stack.
+
+## File Layout
 
 ```
 feedbrief/
@@ -82,35 +94,19 @@ feedbrief/
 ├── assets/                       ← optional .ttf font files
 └── src/
     ├── main.rs                   ← entry point, opens window
-    ├── app.rs                    ← egui UI (idle/loading/results views)
-    ├── feeds.rs                  ← feed source list
-    ├── fetcher.rs                ← parallel RSS fetch with per-feed progress
-    ├── llm.rs                    ← Ollama scoring/summarization
+    ├── app.rs                    ← egui UI and views
+    ├── feeds.rs                  ← feed source list and personas
+    ├── fetcher.rs                ← parallel RSS fetch
+    ├── llm.rs                    ← Ollama scoring and summarization
     ├── progress.rs               ← progress event types
     ├── pipeline.rs               ← orchestration
-    └── storage.rs                ← SQLite persistence + day navigation
+    └── storage.rs                ← SQLite persistence and day navigation
 ```
 
-## Customization
+## Future Enhancements
 
-- **Add/remove feeds**: edit `src/feeds.rs`
-- **Change LLM persona / scoring**: edit prompts in `src/llm.rs`
-- **Tweak colors**: top of `src/app.rs` — all colors are `const Color32`
-- **Window size**: edit `main.rs` (`with_inner_size`)
-
-## Why egui instead of Iced/Slint/Dioxus
-
-- **egui**: shipped today with great GPU rendering, immediate-mode is easy to reason about, dashboard/tool aesthetic looks great on it.
-- **Iced**: better for typography-heavy UIs, but ~3x more code for the same result.
-- **Slint**: requires learning the .slint DSL and dual GPL/commercial licensing.
-- **Dioxus**: pure-native renderer is still experimental; default is webview.
-
-For a single-window information dashboard with progress reporting and history, egui is the pragmatic choice.
-
-## Future enhancements
-
-- Source-level weight overrides ("always show me SemiAnalysis even if scored low")
-- Embedding-based dedupe (currently URL-only)
-- Export day's brief as markdown or PDF
-- Background scheduled fetches (e.g. every morning at 7am)
-- Bookmark/star articles across days
+- Source-level weight overrides
+- Embedding-based dedupe
+- Export a day brief as markdown or PDF
+- Background scheduled fetches
+- Bookmark or star articles across days
