@@ -2,6 +2,8 @@
 
 Feedbrief is a native desktop app that turns RSS feeds into a daily briefing you can actually read. It fetches stories in parallel, scores them with a local Ollama model, summarizes the important ones, and saves each day's result so you can revisit it later.
 
+<img src="docs/feedbrief-screenshot.png" style="width: 50%;" />
+
 ## What It Does
 
 - Pulls from a configurable set of RSS feeds
